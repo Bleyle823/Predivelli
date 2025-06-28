@@ -5,12 +5,10 @@ export default defineConfig({
     test: {
         globals: true,
         environment: 'node',
-        include: ['src/**/*.{test,spec}.{js,mjs,cjs,ts,mts,cts,jsx,tsx}'],
-        exclude: ['node_modules', 'dist', '.idea', '.git', '.cache'],
-    },
-    resolve: {
-        alias: {
-            '@': './src'
+        coverage: {
+            reporter: ['text', 'json', 'html'],
+            include: ['src/**/*.ts'],
+            exclude: ['**/*.test.ts', '**/*.d.ts']
         }
     }
 });

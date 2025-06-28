@@ -1,5 +1,3 @@
-import { Plugin } from '@elizaos/core';
-
-declare const polymarketPlugin: Plugin;
-
-export { polymarketPlugin as default, polymarketPlugin };
+import type { Plugin } from "@elizaos/core";
+export declare const polymarketPlugin: Plugin;
+export default polymarketPlugin;

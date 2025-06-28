@@ -17,8 +17,5 @@ export default defineConfig({
         "agentkeepalive",
         "viem",
         "@lifi/sdk",
-        "@goat-sdk/adapter-vercel-ai",
-        "@goat-sdk/plugin-polymarket",
-        "@goat-sdk/wallet-viem"
     ],
 });

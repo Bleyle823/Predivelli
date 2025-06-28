@@ -1,68 +1,27 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { getPolymarketClient, walletProvider } from '../src/provider';
-import { http, createWalletClient } from 'viem';
-import { privateKeyToAccount } from 'viem/accounts';
-import { polygon } from 'viem/chains';
-import { getOnChainTools } from '@goat-sdk/adapter-vercel-ai';
-import { polymarket } from '@goat-sdk/plugin-polymarket';
-import { viem } from '@goat-sdk/wallet-viem';
+import { getClient, walletProvider } from '../src/provider';
+import { CdpAgentkit } from '@coinbase/cdp-agentkit-core';
+import * as fs from 'fs';
 
 // Mock dependencies
-vi.mock('viem', () => ({
-    http: vi.fn(),
-    createWalletClient: vi.fn().mockImplementation(() => ({
-        account: { address: '0x123...abc' }
-    }))
+vi.mock('@coinbase/cdp-agentkit-core', () => ({
+    CdpAgentkit: {
+        configureWithWallet: vi.fn().mockImplementation(async (config) => ({
+            exportWallet: vi.fn().mockResolvedValue('mocked-wallet-data'),
+            wallet: {
+                addresses: [{ id: '0x123...abc' }]
+            }
+        }))
+    }
 }));
 
-vi.mock('viem/accounts', () => ({
-    privateKeyToAccount: vi.fn().mockImplementation(() => ({
-        address: '0x123...abc'
-    }))
+vi.mock('fs', () => ({
+    existsSync: vi.fn(),
+    readFileSync: vi.fn(),
+    writeFileSync: vi.fn()
 }));
 
-vi.mock('viem/chains', () => ({
-    polygon: { id: 137 }
-}));
-
-vi.mock('@goat-sdk/adapter-vercel-ai', () => ({
-    getOnChainTools: vi.fn().mockResolvedValue([
-        {
-            name: 'getEvents',
-            execute: vi.fn().mockResolvedValue([{ id: '1', title: 'Test Event' }])
-        },
-        {
-            name: 'getMarketInfo',
-            execute: vi.fn().mockResolvedValue({ id: '1', title: 'Test Market' })
-        },
-        {
-            name: 'createOrder',
-            execute: vi.fn().mockResolvedValue({ orderId: '12345' })
-        },
-        {
-            name: 'getOrders',
-            execute: vi.fn().mockResolvedValue([{ id: '1', status: 'active' }])
-        },
-        {
-            name: 'cancelOrder',
-            execute: vi.fn().mockResolvedValue({ success: true })
-        },
-        {
-            name: 'cancelAllOrders',
-            execute: vi.fn().mockResolvedValue({ success: true })
-        }
-    ])
-}));
-
-vi.mock('@goat-sdk/plugin-polymarket', () => ({
-    polymarket: vi.fn().mockImplementation(() => ({ plugin: 'polymarket' }))
-}));
-
-vi.mock('@goat-sdk/wallet-viem', () => ({
-    viem: vi.fn().mockImplementation(() => ({ wallet: 'viem' }))
-}));
-
-describe('Polymarket Provider', () => {
+describe('AgentKit Provider', () => {
     const mockRuntime = {
         name: 'test-runtime',
         memory: new Map(),
@@ -73,79 +32,89 @@ describe('Polymarket Provider', () => {
 
     beforeEach(() => {
         vi.clearAllMocks();
-        process.env.POLYMARKET_API_KEY = 'b9b0f50b-584e-2260-fc98-90a65c28a4bd';
-        process.env.POLYMARKET_SECRET = 'GiFNZ8cwl8WXiQC5aNkCY9CVVs9qZk1MnNl2Lwkmjy4=';
-        process.env.POLYMARKET_PASSPHRASE = '0f4307732b3707cccbbc40b41b15d2b52adc55548d7f87504512adb8244ba58a';
-        process.env.WALLET_PRIVATE_KEY = '0xf34cc7d6ebf0e9f2bd44031a288507b4c162729d37e41d8885c8aea6035ca1a5';
-        process.env.RPC_PROVIDER_URL = 'https://polygon-rpc.com';
+        process.env.CDP_AGENT_KIT_NETWORK = 'base-sepolia';
     });
 
     afterEach(() => {
-        delete process.env.POLYMARKET_API_KEY;
-        delete process.env.POLYMARKET_SECRET;
-        delete process.env.POLYMARKET_PASSPHRASE;
-        delete process.env.WALLET_PRIVATE_KEY;
-        delete process.env.RPC_PROVIDER_URL;
+        delete process.env.CDP_AGENT_KIT_NETWORK;
     });
 
-    describe('getPolymarketClient', () => {
-        it('should create Polymarket client with valid credentials', async () => {
-            const client = await getPolymarketClient();
+    describe('getClient', () => {
+        it('should create new wallet when no existing wallet data', async () => {
+            vi.mocked(fs.existsSync).mockReturnValue(false);
+
+            const client = await getClient();
             
-            expect(privateKeyToAccount).toHaveBeenCalledWith('0x1234567890abcdef');
-            expect(createWalletClient).toHaveBeenCalledWith({
-                account: { address: '0x123...abc' },
-                transport: expect.any(Function),
-                chain: { id: 137 }
+            expect(CdpAgentkit.configureWithWallet).toHaveBeenCalledWith({
+                networkId: 'base-sepolia'
             });
-            expect(getOnChainTools).toHaveBeenCalledWith({
-                wallet: { wallet: 'viem' },
-                plugins: [{ plugin: 'polymarket' }]
-            });
+            expect(fs.writeFileSync).toHaveBeenCalledWith(
+                'wallet_data.txt',
+                'mocked-wallet-data'
+            );
             expect(client).toBeDefined();
-            expect(client.tools).toHaveLength(6);
         });
 
-        it('should throw error when missing API credentials', async () => {
-            delete process.env.POLYMARKET_API_KEY;
+        it('should use existing wallet data when available', async () => {
+            vi.mocked(fs.existsSync).mockReturnValue(true);
+            vi.mocked(fs.readFileSync).mockReturnValue('existing-wallet-data');
+
+            const client = await getClient();
             
-            await expect(getPolymarketClient()).rejects.toThrow(
-                'Missing required Polymarket API credentials'
+            expect(CdpAgentkit.configureWithWallet).toHaveBeenCalledWith({
+                cdpWalletData: 'existing-wallet-data',
+                networkId: 'base-sepolia'
+            });
+            expect(fs.writeFileSync).toHaveBeenCalledWith(
+                'wallet_data.txt',
+                'mocked-wallet-data'
             );
+            expect(client).toBeDefined();
         });
 
-        it('should throw error when missing wallet configuration', async () => {
-            delete process.env.WALLET_PRIVATE_KEY;
+        it('should handle file read errors gracefully', async () => {
+            vi.mocked(fs.existsSync).mockReturnValue(true);
+            vi.mocked(fs.readFileSync).mockImplementation(() => {
+                throw new Error('File read error');
+            });
+
+            const client = await getClient();
             
-            await expect(getPolymarketClient()).rejects.toThrow(
-                'Missing required wallet configuration'
+            expect(CdpAgentkit.configureWithWallet).toHaveBeenCalledWith({
+                networkId: 'base-sepolia'
+            });
+            expect(fs.writeFileSync).toHaveBeenCalledWith(
+                'wallet_data.txt',
+                'mocked-wallet-data'
             );
+            expect(client).toBeDefined();
         });
 
-        it('should handle initialization errors gracefully', async () => {
-            vi.mocked(getOnChainTools).mockRejectedValueOnce(
-                new Error('Initialization failed')
-            );
+        it('should use custom network from environment variable', async () => {
+            process.env.CDP_AGENT_KIT_NETWORK = 'custom-network';
+            vi.mocked(fs.existsSync).mockReturnValue(false);
 
-            await expect(getPolymarketClient()).rejects.toThrow(
-                'Failed to initialize Polymarket client: Initialization failed'
-            );
+            await getClient();
+            
+            expect(CdpAgentkit.configureWithWallet).toHaveBeenCalledWith({
+                networkId: 'custom-network'
+            });
         });
     });
 
     describe('walletProvider', () => {
         it('should return wallet address', async () => {
             const result = await walletProvider.get(mockRuntime);
-            expect(result).toBe('Polymarket Wallet Address: 0x123...abc');
+            expect(result).toBe('AgentKit Wallet Address: 0x123...abc');
         });
 
-        it('should handle errors and return error message', async () => {
-            vi.mocked(getOnChainTools).mockRejectedValueOnce(
+        it('should handle errors and return null', async () => {
+            vi.mocked(CdpAgentkit.configureWithWallet).mockRejectedValueOnce(
                 new Error('Configuration failed')
             );
 
             const result = await walletProvider.get(mockRuntime);
-            expect(result).toBe('Error initializing Polymarket wallet: Configuration failed');
+            expect(result).toBeNull();
         });
     });
 });
