@@ -1,248 +1,101 @@
 import type { Provider, IAgentRuntime } from "@elizaos/core";
-import { ClobClient } from "@polymarket/clob-client";
-import { Wallet } from "ethers";
-import { JsonRpcProvider } from "ethers";
+import { ClobClient, AssetType } from "@polymarket/clob-client";
+import { Wallet } from "@ethersproject/wallet";
+import * as fs from "fs";
 
-export interface PolymarketClientConfig {
-    host: string;
-    chainId: number;
-    privateKey?: string;
-    rpcUrl?: string;
+const WALLET_DATA_FILE = "polymarket_wallet_data.txt";
+const API_KEYS_FILE = "polymarket_api_keys.json";
+
+interface ApiKeyData {
+    key: string;
+    secret: string;
+    passphrase: string;
 }
 
-export class PolymarketService {
-    private clobClient: ClobClient;
-    private wallet?: Wallet;
-    private provider?: JsonRpcProvider;
-    private config: PolymarketClientConfig;
+export async function getPolymarketClient(): Promise<ClobClient> {
+    // Validate required environment variables
+    const privateKey = process.env.POLYMARKET_PRIVATE_KEY;
 
-    constructor(config: PolymarketClientConfig) {
-        this.config = config;
-        this.clobClient = new ClobClient(config.host, config.chainId);
-        
-        if (config.privateKey && config.rpcUrl) {
-            this.provider = new JsonRpcProvider(config.rpcUrl);
-            this.wallet = new Wallet(config.privateKey, this.provider);
-        }
+    if (!privateKey) {
+        throw new Error("Missing required POLYMARKET_PRIVATE_KEY environment variable.");
     }
 
-    // Market Data Methods
-    async getMarkets(options?: { active?: boolean; limit?: number; offset?: number }) {
-        try {
-            const response = await this.clobClient.getMarkets();
-            let markets = response?.data || response || [];
-            
-            if (options?.active !== undefined) {
-                markets = markets.filter(market => market.active === options.active);
+    const host = process.env.POLYMARKET_HOST || 'https://clob.polymarket.com';
+    const chainId = parseInt(process.env.POLYMARKET_CHAIN_ID || '137'); // Polygon mainnet
+    const funder = process.env.POLYMARKET_FUNDER || '0x993f563E24efee863BbD0E54FD5Ca3d010202c39';
+    const signatureType = 0; // Browser wallet type
+
+    try {
+        const wallet = new Wallet(privateKey);
+        let apiKeys: ApiKeyData | null = null;
+
+        // Try to load existing API keys
+        if (fs.existsSync(API_KEYS_FILE)) {
+            try {
+                const keyData = fs.readFileSync(API_KEYS_FILE, "utf8");
+                apiKeys = JSON.parse(keyData);
+            } catch (error) {
+                console.warn("Error reading API keys, will create new ones:", error);
             }
-            
-            if (options?.limit) {
-                markets = markets.slice(options.offset || 0, (options.offset || 0) + options.limit);
-            }
-            
-            return markets;
-        } catch (error) {
-            console.error('Error fetching markets:', error);
-            throw new Error(`Failed to fetch markets: ${error.message}`);
-        }
-    }
-
-    async getSimplifiedMarkets(options?: { active?: boolean; limit?: number }) {
-        try {
-            const response = await this.clobClient.getSimplifiedMarkets();
-            let markets = response?.data || response || [];
-            
-            if (options?.active !== undefined) {
-                markets = markets.filter(market => market.active === options.active);
-            }
-            
-            if (options?.limit) {
-                markets = markets.slice(0, options.limit);
-            }
-            
-            return markets;
-        } catch (error) {
-            console.error('Error fetching simplified markets:', error);
-            throw new Error(`Failed to fetch simplified markets: ${error.message}`);
-        }
-    }
-
-    async getMarket(conditionId: string) {
-        try {
-            return await this.clobClient.getMarket(conditionId);
-        } catch (error) {
-            console.error(`Error fetching market ${conditionId}:`, error);
-            throw new Error(`Failed to fetch market: ${error.message}`);
-        }
-    }
-
-    async getSamplingMarkets(limit?: number) {
-        try {
-            const response = await this.clobClient.getSamplingMarkets();
-            let markets = response?.data || response || [];
-            
-            if (limit) {
-                markets = markets.slice(0, limit);
-            }
-            
-            return markets;
-        } catch (error) {
-            console.error('Error fetching sampling markets:', error);
-            throw new Error(`Failed to fetch sampling markets: ${error.message}`);
-        }
-    }
-
-    // Order Management Methods (requires wallet)
-    async getOrders(marketId?: string) {
-        if (!this.wallet) {
-            throw new Error("Wallet required for order operations");
-        }
-        
-        try {
-            const address = await this.wallet.getAddress();
-            return await this.clobClient.getOrders({ maker: address, market: marketId });
-        } catch (error) {
-            console.error('Error fetching orders:', error);
-            throw new Error(`Failed to fetch orders: ${error.message}`);
-        }
-    }
-
-    async createOrder(params: {
-        tokenId: string;
-        price: string;
-        size: string;
-        side: 'BUY' | 'SELL';
-        feeRateBps?: number;
-        nonce?: number;
-        expiration?: number;
-    }) {
-        if (!this.wallet) {
-            throw new Error("Wallet required for creating orders");
         }
 
-        try {
-            const address = await this.wallet.getAddress();
-            const orderParams = {
-                tokenID: params.tokenId,
-                price: params.price,
-                size: params.size,
-                side: params.side,
-                feeRateBps: params.feeRateBps || 0,
-                nonce: params.nonce || Date.now(),
-                expiration: params.expiration || Math.floor(Date.now() / 1000) + 86400, // 24 hours
-                maker: address,
-                taker: "0x0000000000000000000000000000000000000000"
+        // Create or derive API keys if not available
+        if (!apiKeys) {
+            console.log("Creating new API keys...");
+            const tempClient = new ClobClient(host, chainId, wallet);
+            const creds = await tempClient.createOrDeriveApiKey();
+            
+            apiKeys = {
+                key: creds.key,
+                secret: creds.secret,
+                passphrase: creds.passphrase
             };
 
-            // Sign the order
-            const signature = await this.clobClient.createOrder(orderParams, this.wallet);
-            return signature;
-        } catch (error) {
-            console.error('Error creating order:', error);
-            throw new Error(`Failed to create order: ${error.message}`);
-        }
-    }
-
-    async cancelOrder(orderId: string) {
-        if (!this.wallet) {
-            throw new Error("Wallet required for canceling orders");
+            // Save API keys for future use
+            fs.writeFileSync(API_KEYS_FILE, JSON.stringify(apiKeys, null, 2));
+            console.log("API keys created successfully");
         }
 
-        try {
-            return await this.clobClient.cancelOrder(orderId, this.wallet);
-        } catch (error) {
-            console.error(`Error canceling order ${orderId}:`, error);
-            throw new Error(`Failed to cancel order: ${error.message}`);
-        }
-    }
-
-    async cancelAllOrders(marketId?: string) {
-        if (!this.wallet) {
-            throw new Error("Wallet required for canceling orders");
-        }
-
-        try {
-            return await this.clobClient.cancelAll(this.wallet, marketId);
-        } catch (error) {
-            console.error('Error canceling all orders:', error);
-            throw new Error(`Failed to cancel all orders: ${error.message}`);
-        }
-    }
-
-    // Portfolio and Balance Methods
-    async getPortfolio() {
-        if (!this.wallet) {
-            throw new Error("Wallet required for portfolio operations");
-        }
-
-        try {
-            const address = await this.wallet.getAddress();
-            return await this.clobClient.getPortfolio(address);
-        } catch (error) {
-            console.error('Error fetching portfolio:', error);
-            throw new Error(`Failed to fetch portfolio: ${error.message}`);
-        }
-    }
-
-    async getBalances() {
-        if (!this.wallet) {
-            throw new Error("Wallet required for balance operations");
-        }
-
-        try {
-            const address = await this.wallet.getAddress();
-            return await this.clobClient.getBalances(address);
-        } catch (error) {
-            console.error('Error fetching balances:', error);
-            throw new Error(`Failed to fetch balances: ${error.message}`);
-        }
-    }
-
-    // Utility Methods
-    getWalletAddress(): string | null {
-        return this.wallet?.address || null;
-    }
-
-    isWalletConnected(): boolean {
-        return !!this.wallet;
-    }
-}
-
-// Singleton instance
-let polymarketService: PolymarketService | null = null;
-
-export function getPolymarketService(): PolymarketService {
-    if (!polymarketService) {
-        const host = process.env.CLOB_API_URL || process.env.POLYMARKET_API_URL || "https://clob.polymarket.com";
-        const chainId = parseInt(process.env.CHAIN_ID || "137");
-        const privateKey = process.env.WALLET_PRIVATE_KEY || process.env.POLYMARKET_PRIVATE_KEY;
-        const rpcUrl = process.env.RPC_PROVIDER_URL || process.env.POLYGON_RPC_URL;
-
-        polymarketService = new PolymarketService({
+        // Create authenticated client
+        const client = new ClobClient(
             host,
             chainId,
-            privateKey,
-            rpcUrl
-        });
+            wallet,
+            apiKeys,
+            signatureType,
+            funder
+        );
+
+        return client;
+    } catch (error) {
+        console.error("Failed to initialize Polymarket client:", error);
+        const errorMessage = error instanceof Error ? error.message : String(error);
+        throw new Error(`Failed to initialize Polymarket client: ${errorMessage}`);
     }
-    
-    return polymarketService;
 }
 
-export const walletProvider: Provider = {
+export const polymarketProvider: Provider = {
     async get(runtime: IAgentRuntime): Promise<string | null> {
         try {
-            const service = getPolymarketService();
-            const address = service.getWalletAddress();
+            const client = await getPolymarketClient();
             
-            if (address) {
-                return `Polymarket Wallet Address: ${address}`;
-            } else {
-                return "Polymarket service initialized (read-only mode - no wallet configured)";
-            }
+            // Get wallet address
+            const wallet = new Wallet(process.env.POLYMARKET_PRIVATE_KEY!);
+            const address = await wallet.getAddress();
+            
+            // Get USDC balance and allowance
+            const balanceAllowance = await client.getBalanceAllowance({
+                asset_type: AssetType.COLLATERAL
+            });
+
+            return `Polymarket Wallet:
+Address: ${address}
+USDC Balance: ${balanceAllowance.balance}
+USDC Allowance: ${balanceAllowance.allowance}`;
         } catch (error) {
             console.error("Error in Polymarket provider:", error);
-            return `Error initializing Polymarket service: ${error.message}`;
+            const errorMessage = error instanceof Error ? error.message : String(error);
+            return `Error connecting to Polymarket: ${errorMessage}`;
         }
     },
 };

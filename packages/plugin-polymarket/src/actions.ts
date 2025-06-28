@@ -9,678 +9,634 @@ import {
     composeContext,
     generateObject,
 } from "@elizaos/core";
-import { getPolymarketService } from "./provider";
+import { ClobClient, OrderType, Side, AssetType } from "@polymarket/clob-client";
+import { getPolymarketClient } from "./provider";
+import { z } from "zod";
 
-/**
- * Get all Polymarket actions using CLOB client
- */
-export async function getPolymarketActions(): Promise<Action[]> {
-    const actions: Action[] = [
-        {
-            name: "GET_POLYMARKET_MARKETS",
-            similes: ["LIST_MARKETS", "SHOW_MARKETS", "VIEW_MARKETS", "GET_EVENTS", "BROWSE_MARKETS"],
-            description: "Get Polymarket markets and events with optional filtering",
-            validate: async () => true,
-            handler: async (
-                runtime: IAgentRuntime,
-                message: Memory,
-                state: State | undefined,
-                options?: Record<string, unknown>,
-                callback?: HandlerCallback
-            ): Promise<boolean> => {
-                try {
-                    const service = getPolymarketService();
-                    
-                    let currentState = state ?? (await runtime.composeState(message));
-                    currentState = await runtime.updateRecentMessageState(currentState);
+// Schema definitions for action parameters
+const PlaceBetSchema = z.object({
+    tokenId: z.string().describe("The token ID of the market outcome"),
+    side: z.enum(["BUY", "SELL"]).describe("Whether to buy or sell the outcome"),
+    amount: z.number().positive().describe("Amount of USDC to bet"),
+    price: z.number().min(0.01).max(0.99).describe("Price per share (0.01 to 0.99)"),
+});
 
-                    const marketsContext = composeContext({
-                        state: currentState,
-                        template: `{{recentMessages}}
+const CheckBalanceSchema = z.object({});
 
-Extract market search criteria from the recent messages. Look for:
-- Keywords to search for in market questions
-- Active/inactive status preference
-- Number of markets requested (limit)
-- Any specific market categories or topics
-If no specific criteria is mentioned, get active markets with a reasonable limit.`
-                    });
+const GetMarketsSchema = z.object({
+    limit: z.number().optional().describe("Maximum number of markets to return"),
+});
 
-                    const { object: params } = await generateObject({
-                        runtime,
-                        context: marketsContext,
-                        modelClass: ModelClass.LARGE,
-                        schema: {
-                            type: "object",
-                            properties: {
-                                active: { type: "boolean", description: "Filter for active markets only", default: true },
-                                limit: { type: "number", description: "Number of markets to return", default: 10 },
-                                searchTerm: { type: "string", description: "Search term to filter markets by question content" }
-                            }
-                        }
-                    });
+const GetMarketSchema = z.object({
+    conditionId: z.string().describe("The condition ID of the market"),
+});
 
-                    let markets = await service.getMarkets({
-                        active: params.active,
-                        limit: params.limit
-                    });
+const GetMoreMarketsSchema = z.object({
+    cursor: z.string().describe("The cursor for pagination to get next batch of markets"),
+    limit: z.number().optional().describe("Maximum number of markets to return"),
+});
 
-                    // Filter by search term if provided
-                    if (params.searchTerm) {
-                        const searchLower = params.searchTerm.toLowerCase();
-                        markets = markets.filter(market => 
-                            market.question?.toLowerCase().includes(searchLower) ||
-                            market.description?.toLowerCase().includes(searchLower)
-                        );
-                    }
+const CancelOrderSchema = z.object({
+    orderId: z.string().describe("The ID of the order to cancel"),
+});
 
-                    const responseText = await generateResponse(
-                        runtime,
-                        currentState,
-                        "GET_POLYMARKET_MARKETS",
-                        { markets, count: markets.length, searchTerm: params.searchTerm },
-                        `Retrieved ${markets.length} Polymarket markets successfully`
-                    );
+// Place Bet Action
+export const placeBetAction: Action = {
+    name: "PLACE_BET",
+    description: "Place a bet on a Polymarket outcome",
+    similes: ["bet", "wager", "place order", "buy shares", "sell shares"],
+    validate: async () => true,
+    handler: async (
+        runtime: IAgentRuntime,
+        message: Memory,
+        state: State | undefined,
+        options?: Record<string, unknown>,
+        callback?: HandlerCallback
+    ): Promise<boolean> => {
+        try {
+            const client = await getPolymarketClient();
+            let currentState = state ?? (await runtime.composeState(message));
+            currentState = await runtime.updateRecentMessageState(currentState);
 
-                    callback?.({ text: responseText, content: { markets, count: markets.length } });
-                    return true;
-                } catch (error) {
-                    return handleError(error, "GET_POLYMARKET_MARKETS", callback);
+            const parameterContext = composeContext({
+                state: currentState,
+                template: `{{recentMessages}}
+
+Extract the following information for placing a bet:
+- tokenId: The token ID of the market outcome
+- side: Whether to BUY or SELL
+- amount: Amount of USDC to bet
+- price: Price per share (between 0.01 and 0.99)
+
+Respond with a JSON object containing these parameters.`
+            });
+
+            const { object: parameters } = await generateObject({
+                runtime,
+                context: parameterContext,
+                modelClass: ModelClass.LARGE,
+                schema: PlaceBetSchema,
+            });
+
+            // Type the parameters properly
+            const typedParameters = parameters as z.infer<typeof PlaceBetSchema>;
+
+            // Check balance and allowance first
+            const balanceAllowance = await client.getBalanceAllowance({
+                asset_type: AssetType.COLLATERAL
+            });
+
+            const balance = parseFloat(balanceAllowance.balance);
+            const allowance = parseFloat(balanceAllowance.allowance);
+            const requiredAmount = typedParameters.amount;
+
+            if (balance < requiredAmount) {
+                const errorMsg = `Insufficient USDC balance. You have ${balance} USDC but need ${requiredAmount} USDC for this bet.`;
+                callback?.({ 
+                    text: errorMsg,
+                    content: { error: errorMsg, balance, required: requiredAmount }
+                });
+                return false;
+            }
+
+            // Update allowance if needed
+            if (allowance < requiredAmount) {
+                console.log("Updating USDC allowance...");
+                await client.updateBalanceAllowance({
+                    asset_type: AssetType.COLLATERAL
+                });
+            }
+
+            // Calculate order size based on amount and price
+            const orderSize = typedParameters.amount / typedParameters.price;
+
+            // Place the order
+            const order = await client.createAndPostOrder(
+                {
+                    tokenID: typedParameters.tokenId,
+                    price: typedParameters.price,
+                    side: typedParameters.side === "BUY" ? Side.BUY : Side.SELL,
+                    size: orderSize,
+                    feeRateBps: 0,
+                },
+                { tickSize: "0.01", negRisk: false },
+                OrderType.GTC
+            );
+
+            const responseContext = composeContext({
+                state: currentState,
+                template: `{{recentMessages}}
+
+A bet was placed successfully on Polymarket:
+- Side: ${typedParameters.side}
+- Amount: ${typedParameters.amount} USDC
+- Price: ${typedParameters.price} per share
+- Shares: ${orderSize}
+- Order ID: ${order.orderID}
+
+Generate a natural response confirming the bet placement.`
+            });
+
+            const response = await generateText({
+                runtime,
+                context: responseContext,
+                modelClass: ModelClass.LARGE,
+            });
+
+            callback?.({ 
+                text: response,
+                content: {
+                    success: true,
+                    order,
+                    parameters: typedParameters,
+                    orderSize
                 }
-            },
-            examples: [
-                [
-                    {
-                        user: "{{user1}}",
-                        content: { text: "Show me the latest Polymarket markets" }
-                    },
-                    {
-                        user: "{{user2}}",
-                        content: { text: "Here are the latest Polymarket markets..." }
-                    }
-                ],
-                [
-                    {
-                        user: "{{user1}}",
-                        content: { text: "Find markets about the 2024 election" }
-                    },
-                    {
-                        user: "{{user2}}",
-                        content: { text: "Here are the election-related markets I found..." }
-                    }
-                ]
-            ]
-        },
-        {
-            name: "GET_MARKET_DETAILS",
-            similes: ["MARKET_INFO", "SHOW_MARKET", "VIEW_MARKET", "MARKET_DETAILS"],
-            description: "Get detailed information about a specific market",
-            validate: async () => true,
-            handler: async (
-                runtime: IAgentRuntime,
-                message: Memory,
-                state: State | undefined,
-                options?: Record<string, unknown>,
-                callback?: HandlerCallback
-            ): Promise<boolean> => {
-                try {
-                    const service = getPolymarketService();
-                    
-                    let currentState = state ?? (await runtime.composeState(message));
-                    currentState = await runtime.updateRecentMessageState(currentState);
-
-                    const marketContext = composeContext({
-                        state: currentState,
-                        template: `{{recentMessages}}
-
-Extract the market identifier from the recent messages. Look for:
-- Condition ID (hexadecimal string)
-- Market question or description
-- Token address
-If no specific market is mentioned, ask the user to provide more details.`
-                    });
-
-                    const { object: params } = await generateObject({
-                        runtime,
-                        context: marketContext,
-                        modelClass: ModelClass.LARGE,
-                        schema: {
-                            type: "object",
-                            properties: {
-                                conditionId: { type: "string", description: "Market condition ID" },
-                                searchQuery: { type: "string", description: "Search query to find market by question" }
-                            }
-                        }
-                    });
-
-                    let market;
-                    
-                    if (params.conditionId) {
-                        market = await service.getMarket(params.conditionId);
-                    } else if (params.searchQuery) {
-                        // Search for markets matching query
-                        const markets = await service.getMarkets({ limit: 50 });
-                        const searchLower = params.searchQuery.toLowerCase();
-                        const foundMarket = markets.find(m => 
-                            m.question?.toLowerCase().includes(searchLower) ||
-                            m.description?.toLowerCase().includes(searchLower)
-                        );
-                        
-                        if (foundMarket) {
-                            market = await service.getMarket(foundMarket.condition_id);
-                        } else {
-                            throw new Error(`No market found matching: ${params.searchQuery}`);
-                        }
-                    } else {
-                        throw new Error("Please provide a market condition ID or search query");
-                    }
-
-                    const responseText = await generateResponse(
-                        runtime,
-                        currentState,
-                        "GET_MARKET_DETAILS",
-                        market,
-                        "Retrieved market details successfully"
-                    );
-
-                    callback?.({ text: responseText, content: market });
-                    return true;
-                } catch (error) {
-                    return handleError(error, "GET_MARKET_DETAILS", callback);
-                }
-            },
-            examples: [
-                [
-                    {
-                        user: "{{user1}}",
-                        content: { text: "Get details for market condition ID 0x123..." }
-                    },
-                    {
-                        user: "{{user2}}",
-                        content: { text: "Here are the market details..." }
-                    }
-                ]
-            ]
-        },
-        {
-            name: "CREATE_POLYMARKET_ORDER",
-            similes: ["PLACE_ORDER", "BUY_TOKENS", "SELL_TOKENS", "TRADE", "BET"],
-            description: "Create a buy or sell order on Polymarket",
-            validate: async () => true,
-            handler: async (
-                runtime: IAgentRuntime,
-                message: Memory,
-                state: State | undefined,
-                options?: Record<string, unknown>,
-                callback?: HandlerCallback
-            ): Promise<boolean> => {
-                try {
-                    const service = getPolymarketService();
-                    
-                    if (!service.isWalletConnected()) {
-                        throw new Error("Wallet not configured. Please set WALLET_PRIVATE_KEY and RPC_PROVIDER_URL environment variables.");
-                    }
-                    
-                    let currentState = state ?? (await runtime.composeState(message));
-                    currentState = await runtime.updateRecentMessageState(currentState);
-
-                    const orderContext = composeContext({
-                        state: currentState,
-                        template: `{{recentMessages}}
-
-Extract order parameters from the recent messages. Look for:
-- Token ID for the market position
-- Order side (BUY or SELL)
-- Amount/size to trade
-- Price per token (between 0.01 and 0.99)
-- Market question or condition ID to identify the market`
-                    });
-
-                    const { object: params } = await generateObject({
-                        runtime,
-                        context: orderContext,
-                        modelClass: ModelClass.LARGE,
-                        schema: {
-                            type: "object",
-                            properties: {
-                                tokenId: { type: "string", description: "Token ID for the market position" },
-                                side: { type: "string", enum: ["BUY", "SELL"], description: "Order side" },
-                                size: { type: "string", description: "Amount to trade (in shares)" },
-                                price: { type: "string", description: "Price per token (0.01 to 0.99)" },
-                                marketQuery: { type: "string", description: "Market search query if token ID not provided" }
-                            }
-                        }
-                    });
-
-                    // Validate required parameters
-                    if (!params.tokenId && !params.marketQuery) {
-                        throw new Error("Please provide either a token ID or market search query");
-                    }
-                    
-                    if (!params.side || !params.size || !params.price) {
-                        throw new Error("Please provide order side (BUY/SELL), size, and price");
-                    }
-
-                    // Validate price range
-                    const priceNum = parseFloat(params.price);
-                    if (priceNum < 0.01 || priceNum > 0.99) {
-                        throw new Error("Price must be between 0.01 and 0.99");
-                    }
-
-                    // If token ID not provided, search for market
-                    let tokenId = params.tokenId;
-                    if (!tokenId && params.marketQuery) {
-                        const markets = await service.getMarkets({ limit: 50 });
-                        const searchLower = params.marketQuery.toLowerCase();
-                        const foundMarket = markets.find(m => 
-                            m.question?.toLowerCase().includes(searchLower)
-                        );
-                        
-                        if (foundMarket && foundMarket.tokens && foundMarket.tokens.length > 0) {
-                            // Use first token (YES token typically)
-                            tokenId = foundMarket.tokens[0].token_id;
-                        } else {
-                            throw new Error(`No market found matching: ${params.marketQuery}`);
-                        }
-                    }
-
-                    const result = await service.createOrder({
-                        tokenId: tokenId!,
-                        price: params.price,
-                        size: params.size,
-                        side: params.side as 'BUY' | 'SELL'
-                    });
-
-                    const responseText = await generateResponse(
-                        runtime,
-                        currentState,
-                        "CREATE_POLYMARKET_ORDER",
-                        result,
-                        `${params.side} order created successfully`
-                    );
-
-                    callback?.({ text: responseText, content: result });
-                    return true;
-                } catch (error) {
-                    return handleError(error, "CREATE_POLYMARKET_ORDER", callback);
-                }
-            },
-            examples: [
-                [
-                    {
-                        user: "{{user1}}",
-                        content: { text: "Buy 10 YES tokens at 0.60 for the election market" }
-                    },
-                    {
-                        user: "{{user2}}",
-                        content: { text: "Created buy order for 10 YES tokens at 0.60..." }
-                    }
-                ]
-            ]
-        },
-        {
-            name: "GET_MY_ORDERS",
-            similes: ["MY_ORDERS", "LIST_ORDERS", "SHOW_ORDERS", "VIEW_ORDERS"],
-            description: "Get all active orders for the connected wallet",
-            validate: async () => true,
-            handler: async (
-                runtime: IAgentRuntime,
-                message: Memory,
-                state: State | undefined,
-                options?: Record<string, unknown>,
-                callback?: HandlerCallback
-            ): Promise<boolean> => {
-                try {
-                    const service = getPolymarketService();
-                    
-                    if (!service.isWalletConnected()) {
-                        throw new Error("Wallet not configured. Please set WALLET_PRIVATE_KEY and RPC_PROVIDER_URL environment variables.");
-                    }
-                    
-                    let currentState = state ?? (await runtime.composeState(message));
-                    currentState = await runtime.updateRecentMessageState(currentState);
-
-                    const result = await service.getOrders();
-
-                    const responseText = await generateResponse(
-                        runtime,
-                        currentState,
-                        "GET_MY_ORDERS",
-                        result,
-                        "Retrieved your active orders successfully"
-                    );
-
-                    callback?.({ text: responseText, content: result });
-                    return true;
-                } catch (error) {
-                    return handleError(error, "GET_MY_ORDERS", callback);
-                }
-            },
-            examples: [
-                [
-                    {
-                        user: "{{user1}}",
-                        content: { text: "Show me my active orders" }
-                    },
-                    {
-                        user: "{{user2}}",
-                        content: { text: "Here are your active orders..." }
-                    }
-                ]
-            ]
-        },
-        {
-            name: "CANCEL_ORDER",
-            similes: ["CANCEL", "REMOVE_ORDER", "DELETE_ORDER"],
-            description: "Cancel a specific order by ID",
-            validate: async () => true,
-            handler: async (
-                runtime: IAgentRuntime,
-                message: Memory,
-                state: State | undefined,
-                options?: Record<string, unknown>,
-                callback?: HandlerCallback
-            ): Promise<boolean> => {
-                try {
-                    const service = getPolymarketService();
-                    
-                    if (!service.isWalletConnected()) {
-                        throw new Error("Wallet not configured. Please set WALLET_PRIVATE_KEY and RPC_PROVIDER_URL environment variables.");
-                    }
-                    
-                    let currentState = state ?? (await runtime.composeState(message));
-                    currentState = await runtime.updateRecentMessageState(currentState);
-
-                    const cancelContext = composeContext({
-                        state: currentState,
-                        template: `{{recentMessages}}
-
-Extract the order ID to cancel from the recent messages. Look for:
-- Order ID or order hash
-- Specific order reference number`
-                    });
-
-                    const { object: params } = await generateObject({
-                        runtime,
-                        context: cancelContext,
-                        modelClass: ModelClass.LARGE,
-                        schema: {
-                            type: "object",
-                            properties: {
-                                orderId: { type: "string", description: "Order ID to cancel" }
-                            },
-                            required: ["orderId"]
-                        }
-                    });
-
-                    const result = await service.cancelOrder(params.orderId);
-
-                    const responseText = await generateResponse(
-                        runtime,
-                        currentState,
-                        "CANCEL_ORDER",
-                        result,
-                        "Order cancelled successfully"
-                    );
-
-                    callback?.({ text: responseText, content: result });
-                    return true;
-                } catch (error) {
-                    return handleError(error, "CANCEL_ORDER", callback);
-                }
-            },
-            examples: [
-                [
-                    {
-                        user: "{{user1}}",
-                        content: { text: "Cancel order 0xabc123..." }
-                    },
-                    {
-                        user: "{{user2}}",
-                        content: { text: "Order has been cancelled successfully" }
-                    }
-                ]
-            ]
-        },
-        {
-            name: "CANCEL_ALL_ORDERS",
-            similes: ["CANCEL_ALL", "REMOVE_ALL_ORDERS", "DELETE_ALL_ORDERS"],
-            description: "Cancel all active orders for the wallet",
-            validate: async () => true,
-            handler: async (
-                runtime: IAgentRuntime,
-                message: Memory,
-                state: State | undefined,
-                options?: Record<string, unknown>,
-                callback?: HandlerCallback
-            ): Promise<boolean> => {
-                try {
-                    const service = getPolymarketService();
-                    
-                    if (!service.isWalletConnected()) {
-                        throw new Error("Wallet not configured. Please set WALLET_PRIVATE_KEY and RPC_PROVIDER_URL environment variables.");
-                    }
-                    
-                    let currentState = state ?? (await runtime.composeState(message));
-                    currentState = await runtime.updateRecentMessageState(currentState);
-
-                    const result = await service.cancelAllOrders();
-
-                    const responseText = await generateResponse(
-                        runtime,
-                        currentState,
-                        "CANCEL_ALL_ORDERS",
-                        result,
-                        "All orders cancelled successfully"
-                    );
-
-                    callback?.({ text: responseText, content: result });
-                    return true;
-                } catch (error) {
-                    return handleError(error, "CANCEL_ALL_ORDERS", callback);
-                }
-            },
-            examples: [
-                [
-                    {
-                        user: "{{user1}}",
-                        content: { text: "Cancel all my orders" }
-                    },
-                    {
-                        user: "{{user2}}",
-                        content: { text: "All orders have been cancelled successfully" }
-                    }
-                ]
-            ]
-        },
-        {
-            name: "GET_PORTFOLIO",
-            similes: ["MY_PORTFOLIO", "SHOW_PORTFOLIO", "VIEW_PORTFOLIO", "HOLDINGS"],
-            description: "Get portfolio information including positions and balances",
-            validate: async () => true,
-            handler: async (
-                runtime: IAgentRuntime,
-                message: Memory,
-                state: State | undefined,
-                options?: Record<string, unknown>,
-                callback?: HandlerCallback
-            ): Promise<boolean> => {
-                try {
-                    const service = getPolymarketService();
-                    
-                    if (!service.isWalletConnected()) {
-                        throw new Error("Wallet not configured. Please set WALLET_PRIVATE_KEY and RPC_PROVIDER_URL environment variables.");
-                    }
-                    
-                    let currentState = state ?? (await runtime.composeState(message));
-                    currentState = await runtime.updateRecentMessageState(currentState);
-
-                    const [portfolio, balances] = await Promise.all([
-                        service.getPortfolio(),
-                        service.getBalances()
-                    ]);
-
-                    const result = { portfolio, balances };
-
-                    const responseText = await generateResponse(
-                        runtime,
-                        currentState,
-                        "GET_PORTFOLIO",
-                        result,
-                        "Retrieved portfolio information successfully"
-                    );
-
-                    callback?.({ text: responseText, content: result });
-                    return true;
-                } catch (error) {
-                    return handleError(error, "GET_PORTFOLIO", callback);
-                }
-            },
-            examples: [
-                [
-                    {
-                        user: "{{user1}}",
-                        content: { text: "Show me my portfolio" }
-                    },
-                    {
-                        user: "{{user2}}",
-                        content: { text: "Here's your portfolio summary..." }
-                    }
-                ]
-            ]
-        },
-        {
-            name: "GET_SAMPLING_MARKETS",
-            similes: ["TRENDING_MARKETS", "POPULAR_MARKETS", "SAMPLE_MARKETS"],
-            description: "Get a sample of trending or popular markets",
-            validate: async () => true,
-            handler: async (
-                runtime: IAgentRuntime,
-                message: Memory,
-                state: State | undefined,
-                options?: Record<string, unknown>,
-                callback?: HandlerCallback
-            ): Promise<boolean> => {
-                try {
-                    const service = getPolymarketService();
-                    
-                    let currentState = state ?? (await runtime.composeState(message));
-                    currentState = await runtime.updateRecentMessageState(currentState);
-
-                    const samplingContext = composeContext({
-                        state: currentState,
-                        template: `{{recentMessages}}
-
-Extract sampling parameters from the recent messages. Look for:
-- Number of markets requested
-- Any specific preferences for trending/popular markets`
-                    });
-
-                    const { object: params } = await generateObject({
-                        runtime,
-                        context: samplingContext,
-                        modelClass: ModelClass.LARGE,
-                        schema: {
-                            type: "object",
-                            properties: {
-                                limit: { type: "number", description: "Number of markets to return", default: 10 }
-                            }
-                        }
-                    });
-
-                    const result = await service.getSamplingMarkets(params.limit);
-
-                    const responseText = await generateResponse(
-                        runtime,
-                        currentState,
-                        "GET_SAMPLING_MARKETS",
-                        { markets: result, count: result.length },
-                        `Retrieved ${result.length} trending markets successfully`
-                    );
-
-                    callback?.({ text: responseText, content: { markets: result, count: result.length } });
-                    return true;
-                } catch (error) {
-                    return handleError(error, "GET_SAMPLING_MARKETS", callback);
-                }
-            },
-            examples: [
-                [
-                    {
-                        user: "{{user1}}",
-                        content: { text: "Show me some trending markets" }
-                    },
-                    {
-                        user: "{{user2}}",
-                        content: { text: "Here are some trending markets..." }
-                    }
-                ]
-            ]
+            });
+            return true;
+        } catch (error) {
+            const errorMessage = error instanceof Error ? error.message : String(error);
+            callback?.({
+                text: `Error placing bet: ${errorMessage}`,
+                content: { error: errorMessage },
+            });
+            return false;
         }
-    ];
+    },
+    examples: [
+        [
+            {
+                user: "{{user1}}",
+                content: {
+                    text: "I want to bet $10 on Trump winning at 65 cents per share",
+                },
+            },
+            {
+                user: "{{agentName}}",
+                content: {
+                    text: "I'll place a $10 bet on Trump winning at $0.65 per share. This will buy approximately 15.38 shares.",
+                    action: "PLACE_BET",
+                },
+            },
+        ],
+    ],
+};
 
-    return actions;
-}
+// Get More Markets Action - For Pagination
+export const getMoreMarketsAction: Action = {
+    name: "GET_MORE_MARKETS",
+    description: "Get next batch of markets using pagination cursor",
+    similes: ["more markets", "next page", "continue", "see more"],
+    validate: async () => true,
+    handler: async (
+        runtime: IAgentRuntime,
+        message: Memory,
+        state: State | undefined,
+        options?: Record<string, unknown>,
+        callback?: HandlerCallback
+    ): Promise<boolean> => {
+        try {
+            let currentState = state ?? (await runtime.composeState(message));
 
-async function generateResponse(
-    runtime: IAgentRuntime,
-    state: State,
-    actionName: string,
-    result: unknown,
-    successMessage: string
-): Promise<string> {
-    const responseTemplate = `
-# Action Examples
-{{actionExamples}}
+            const parameterContext = composeContext({
+                state: currentState,
+                template: `{{recentMessages}}
 
-# Knowledge
-{{knowledge}}
+Extract the cursor from the previous markets request to get the next batch.
+- cursor: The pagination cursor (required)
+- limit: Maximum number of markets to return (optional, default 5)
 
-# Task: Generate dialog and actions for the character {{agentName}}.
-About {{agentName}}:
-{{bio}}
-{{lore}}
+Respond with a JSON object.`
+            });
 
-{{providers}}
+            const { object: parameters } = await generateObject({
+                runtime,
+                context: parameterContext,
+                modelClass: ModelClass.LARGE,
+                schema: GetMoreMarketsSchema,
+            });
 
-{{attachments}}
+            const typedParameters = parameters as z.infer<typeof GetMoreMarketsSchema>;
+            const displayLimit = Math.min(typedParameters.limit || 5, 8);
 
-# Capabilities
-Note that {{agentName}} is capable of reading/seeing/hearing various forms of media, including images, videos, audio, plaintext and PDFs. Recent attachments have been included above under the "Attachments" section.
+            // Check if cursor indicates end of results
+            if (typedParameters.cursor === 'LTE=' || !typedParameters.cursor) {
+                callback?.({
+                    text: "No more markets available. You've reached the end of the results.",
+                    content: { endOfResults: true }
+                });
+                return true;
+            }
 
-The action "${actionName}" was executed successfully.
-${successMessage}
+            try {
+                const url = `https://clob.polymarket.com/markets?limit=${displayLimit}&next_cursor=${encodeURIComponent(typedParameters.cursor)}`;
+                const response = await fetch(url, {
+                    method: 'GET',
+                    headers: {
+                        'Accept': 'application/json',
+                        'Content-Type': 'application/json',
+                    }
+                });
+                
+                if (!response.ok) {
+                    throw new Error(`HTTP error! status: ${response.status}`);
+                }
+                
+                const data = await response.json();
+                let markets = data.data || [];
+                const totalCount = data.count || 0;
+                const nextCursor = data.next_cursor;
 
-Here is the result:
-${JSON.stringify(result, null, 2)}
+                // Process markets efficiently
+                const essentialMarkets = markets.map((market: any) => ({
+                    condition_id: market.condition_id,
+                    question: market.question || 'Unknown Market',
+                    description: market.description?.substring(0, 100) + (market.description?.length > 100 ? '...' : '') || 'No description',
+                    active: market.active,
+                    tokens: market.tokens?.map((token: any) => ({
+                        token_id: token.token_id,
+                        outcome: token.outcome
+                    })) || []
+                }));
 
-{{actions}}
+                const marketSummary = essentialMarkets.map((market: any, index: number) => {
+                    const outcomes = market.tokens.map((t: any) => t.outcome).join(' vs ');
+                    return `${index + 1}. ${market.question.substring(0, 80)}${market.question.length > 80 ? '...' : ''} (${outcomes})`;
+                }).join('\n');
 
-Respond to the message knowing that the action was successful and these were the previous messages:
-{{recentMessages}}
+                const responseContext = composeContext({
+                    state: currentState,
+                    template: `{{recentMessages}}
+
+Next batch of markets:
+${marketSummary}
+
+Generate a response showing these additional markets.`
+                });
+
+                const responseText = await generateText({
+                    runtime,
+                    context: responseContext,
+                    modelClass: ModelClass.LARGE,
+                });
+
+                callback?.({ 
+                    text: responseText,
+                    content: { 
+                        markets: essentialMarkets,
+                        hasMore: nextCursor && nextCursor !== 'LTE=',
+                        nextCursor
+                    }
+                });
+                return true;
+                
+            } catch (error) {
+                console.error("Failed to fetch more markets:", error);
+                throw new Error(`Failed to get more markets: ${error instanceof Error ? error.message : String(error)}`);
+            }
+            
+        } catch (error) {
+            const errorMessage = error instanceof Error ? error.message : String(error);
+            callback?.({
+                text: `Error getting more markets: ${errorMessage}`,
+                content: { error: errorMessage },
+            });
+            return false;
+        }
+    },
+    examples: [
+        [
+            {
+                user: "{{user1}}",
+                content: {
+                    text: "Show me more markets",
+                },
+            },
+            {
+                user: "{{agentName}}",
+                content: {
+                    text: "Here are more markets from Polymarket...",
+                    action: "GET_MORE_MARKETS",
+                },
+            },
+        ],
+    ],
+};
+
+// Check Balance Action
+export const checkBalanceAction: Action = {
+    name: "CHECK_BALANCE",
+    description: "Check USDC balance and allowance on Polymarket",
+    similes: ["balance", "funds", "money", "usdc", "check wallet"],
+    validate: async () => true,
+    handler: async (
+        runtime: IAgentRuntime,
+        message: Memory,
+        state: State | undefined,
+        options?: Record<string, unknown>,
+        callback?: HandlerCallback
+    ): Promise<boolean> => {
+        try {
+            const client = await getPolymarketClient();
+            let currentState = state ?? (await runtime.composeState(message));
+
+            const balanceAllowance = await client.getBalanceAllowance({
+                asset_type: AssetType.COLLATERAL
+            });
+
+            const responseContext = composeContext({
+                state: currentState,
+                template: `{{recentMessages}}
+
+Polymarket wallet balance information:
+- USDC Balance: ${balanceAllowance.balance}
+- USDC Allowance: ${balanceAllowance.allowance}
+
+Generate a natural response with the balance information.`
+            });
+
+            const response = await generateText({
+                runtime,
+                context: responseContext,
+                modelClass: ModelClass.LARGE,
+            });
+
+            callback?.({ 
+                text: response,
+                content: {
+                    balance: balanceAllowance.balance,
+                    allowance: balanceAllowance.allowance
+                }
+            });
+            return true;
+        } catch (error) {
+            const errorMessage = error instanceof Error ? error.message : String(error);
+            callback?.({
+                text: `Error checking balance: ${errorMessage}`,
+                content: { error: errorMessage },
+            });
+            return false;
+        }
+    },
+    examples: [
+        [
+            {
+                user: "{{user1}}",
+                content: {
+                    text: "What's my balance?",
+                },
+            },
+            {
+                user: "{{agentName}}",
+                content: {
+                    text: "Your current USDC balance on Polymarket is $25.50 with an allowance of $100.00",
+                    action: "CHECK_BALANCE",
+                },
+            },
+        ],
+    ],
+};
+
+// Get Markets Action - OPTIMIZED FOR TOKEN EFFICIENCY
+export const getMarketsAction: Action = {
+    name: "GET_MARKETS",
+    description: "Get available markets on Polymarket",
+    similes: ["markets", "betting markets", "available bets", "what can I bet on"],
+    validate: async () => true,
+    handler: async (
+        runtime: IAgentRuntime,
+        message: Memory,
+        state: State | undefined,
+        options?: Record<string, unknown>,
+        callback?: HandlerCallback
+    ): Promise<boolean> => {
+        try {
+            let currentState = state ?? (await runtime.composeState(message));
+
+            const parameterContext = composeContext({
+                state: currentState,
+                template: `{{recentMessages}}
+
+Extract parameters for getting markets:
+- limit: Maximum number of markets to return (optional, default 5, max 10)
+
+Respond with a JSON object.`
+            });
+
+            const { object: parameters } = await generateObject({
+                runtime,
+                context: parameterContext,
+                modelClass: ModelClass.LARGE,
+                schema: GetMarketsSchema,
+            });
+
+            // Type the parameters properly
+            const typedParameters = parameters as z.infer<typeof GetMarketsSchema>;
+
+            // Cap the limit to prevent token overflow - conservative limit
+            const requestLimit = Math.min(typedParameters.limit || 5, 20); // Request more to have options
+            const displayLimit = Math.min(typedParameters.limit || 5, 8);  // But only display fewer
+            
+            try {
+                // Strategy 1: Use API limit parameter (not cursor) to cap initial data
+                const url = `https://clob.polymarket.com/markets?limit=${requestLimit}`;
+                const response = await fetch(url, {
+                    method: 'GET',
+                    headers: {
+                        'Accept': 'application/json',
+                        'Content-Type': 'application/json',
+                    }
+                });
+                
+                if (!response.ok) {
+                    throw new Error(`HTTP error! status: ${response.status}`);
+                }
+                
+                const data = await response.json();
+                let markets = data.data || [];
+                const totalCount = data.count || markets.length;
+                const nextCursor = data.next_cursor;
+
+                // Strategy 2: Filter out essential fields only to reduce token usage
+                const essentialMarkets = markets.slice(0, displayLimit).map((market: any) => ({
+                    condition_id: market.condition_id,
+                    question: market.question || 'Unknown Market',
+                    description: market.description?.substring(0, 100) + (market.description?.length > 100 ? '...' : '') || 'No description',
+                    active: market.active,
+                    end_date_iso: market.end_date_iso,
+                    tokens: market.tokens?.map((token: any) => ({
+                        token_id: token.token_id,
+                        outcome: token.outcome
+                    })) || []
+                }));
+
+                // Strategy 3: Create ultra-concise summary for context
+                const marketSummary = essentialMarkets.map((market: any, index: number) => {
+                    const outcomes = market.tokens.map((t: any) => t.outcome).join(' vs ');
+                    return `${index + 1}. ${market.question.substring(0, 80)}${market.question.length > 80 ? '...' : ''} (${outcomes})`;
+                }).join('\n');
+
+                // Strategy 4: Keep response context minimal
+                const responseContext = composeContext({
+                    state: currentState,
+                    template: `{{recentMessages}}
+
+Found ${displayLimit} markets (${totalCount} total available):
+${marketSummary}
+
+Generate a concise response listing the markets. Keep it brief.`
+                });
+
+                const responseText = await generateText({
+                    runtime,
+                    context: responseContext,
+                    modelClass: ModelClass.LARGE,
+                });
+
+                // Strategy 5: Return minimal essential data in content
+                callback?.({ 
+                    text: responseText,
+                    content: { 
+                        markets: essentialMarkets, // Only essential fields
+                        totalCount,
+                        displayLimit,
+                        hasMore: nextCursor && nextCursor !== 'LTE=', // Check if more pages available
+                        nextCursor: nextCursor // Store for potential pagination
+                    }
+                });
+                return true;
+                
+            } catch (error) {
+                console.error("Failed to fetch markets directly:", error);
+                throw new Error(`Failed to get markets: ${error instanceof Error ? error.message : String(error)}`);
+            }
+            
+        } catch (error) {
+            const errorMessage = error instanceof Error ? error.message : String(error);
+            callback?.({
+                text: `Error getting markets: ${errorMessage}`,
+                content: { error: errorMessage },
+            });
+            return false;
+        }
+    },
+    examples: [
+        [
+            {
+                user: "{{user1}}",
+                content: {
+                    text: "What markets are available for betting?",
+                },
+            },
+            {
+                user: "{{agentName}}",
+                content: {
+                    text: "Here are the current betting markets available on Polymarket...",
+                    action: "GET_MARKETS",
+                },
+            },
+        ],
+    ],
+};
+
+// Get Market Action
+export const getMarketAction: Action = {
+    name: "GET_MARKET",
+    description: "Get details of a specific market on Polymarket",
+    similes: ["market details", "specific market", "market info"],
+    validate: async () => true,
+    handler: async (
+        runtime: IAgentRuntime,
+        message: Memory,
+        state: State | undefined,
+        options?: Record<string, unknown>,
+        callback?: HandlerCallback
+    ): Promise<boolean> => {
+        try {
+            const client = await getPolymarketClient();
+            let currentState = state ?? (await runtime.composeState(message));
+
+            const parameterContext = composeContext({
+                state: currentState,
+                template: `{{recentMessages}}
+
+Extract the condition ID for the market to get details for.
+
+Respond with a JSON object containing the conditionId.`
+            });
+
+            const { object: parameters } = await generateObject({
+                runtime,
+                context: parameterContext,
+                modelClass: ModelClass.LARGE,
+                schema: GetMarketSchema,
+            });
+
+            // Type the parameters properly
+            const typedParameters = parameters as z.infer<typeof GetMarketSchema>;
+
+            const market = await client.getMarket(typedParameters.conditionId);
+
+            // Create a concise summary instead of sending full JSON
+            const marketSummary = `
+Market: ${market.question || market.title || 'Unknown Market'}
+Description: ${market.description || 'No description'}
+Status: ${market.status || 'Unknown'}
+Outcomes: ${market.outcomes ? market.outcomes.length : 0} available
 `;
 
-    const context = composeContext({ state, template: responseTemplate });
-    
-    return generateText({
-        runtime,
-        context,
-        modelClass: ModelClass.LARGE,
-    });
-}
+            const responseContext = composeContext({
+                state: currentState,
+                template: `{{recentMessages}}
 
-function handleError(
-    error: unknown,
-    actionName: string,
-    callback?: HandlerCallback
-): boolean {
-    const errorMessage = error instanceof Error ? error.message : String(error);
-    console.error(`Error executing ${actionName}:`, error);
-    
-    callback?.({
-        text: `Error executing ${actionName}: ${errorMessage}`,
-        content: { error: errorMessage },
-    });
-    
-    return false;
-}
+Market details:
+${marketSummary}
+
+Generate a natural response with the market details.`
+            });
+
+            const response = await generateText({
+                runtime,
+                context: responseContext,
+                modelClass: ModelClass.LARGE,
+            });
+
+            callback?.({ 
+                text: response,
+                content: { market }
+            });
+            return true;
+        } catch (error) {
+            const errorMessage = error instanceof Error ? error.message : String(error);
+            callback?.({
+                text: `Error getting market: ${errorMessage}`,
+                content: { error: errorMessage },
+            });
+            return false;
+        }
+    },
+    examples: [
+        [
+            {
+                user: "{{user1}}",
+                content: {
+                    text: "Tell me about the Trump election market",
+                },
+            },
+            {
+                user: "{{agentName}}",
+                content: {
+                    text: "Here are the details for that market...",
+                    action: "GET_MARKET",
+                },
+            },
+        ],
+    ],
+};
+
+export const polymarketActions: Action[] = [
+    placeBetAction,
+    checkBalanceAction,
+    getMarketsAction,
+    getMoreMarketsAction,
+    getMarketAction,
+];
