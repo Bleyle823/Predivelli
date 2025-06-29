@@ -5,7 +5,8 @@ import {
     checkBalanceAction, 
     getMarketsAction, 
     getMoreMarketsAction,
-    getMarketAction 
+    getMarketAction,
+    getHighActivityMarketsAction
 } from "./actions";
 
 // Initial banner
@@ -40,6 +41,7 @@ const initializeActions = () => {
             getMarketsAction,
             getMoreMarketsAction, 
             getMarketAction,
+            getHighActivityMarketsAction,
             checkBalanceAction,
             placeBetAction
         ];
@@ -71,7 +73,8 @@ export {
     checkBalanceAction, 
     getMarketsAction,
     getMoreMarketsAction,
-    getMarketAction
+    getMarketAction,
+    getHighActivityMarketsAction
 } from "./actions";
 
 export { polymarketProvider, getPolymarketClient } from "./provider";

@@ -37,15 +37,33 @@ export const polymarketProvider: Provider = {
         try {
             const client = await getPolymarketClient();
             
-            // Test the connection by fetching markets
+            // Test the connection by fetching markets and analyzing active ones
             const markets = await client.getMarkets();
-            const marketCount = Array.isArray(markets?.data) ? markets.data.length : 
-                              Array.isArray(markets) ? markets.length : 0;
+            let totalCount = 0;
+            let activeCount = 0;
+            let acceptingOrdersCount = 0;
             
-            return `Polymarket Client: Connected (${marketCount} markets available)`;
+            if (Array.isArray(markets)) {
+                totalCount = markets.length;
+                // Count active markets
+                activeCount = markets.filter((market: any) => market.active !== false).length;
+                acceptingOrdersCount = markets.filter((market: any) => market.accepting_orders !== false).length;
+            } else if (markets && typeof markets === 'object') {
+                const response = markets as any;
+                if (response.data && Array.isArray(response.data)) {
+                    totalCount = response.data.length;
+                    activeCount = response.data.filter((market: any) => market.active !== false).length;
+                    acceptingOrdersCount = response.data.filter((market: any) => market.accepting_orders !== false).length;
+                }
+            }
+            
+            const status = acceptingOrdersCount > 0 ? "🟢" : 
+                          (activeCount > 0 ? "🟡" : "🔴");
+            
+            return `Polymarket Client: ${status} Connected (${totalCount} total, ${activeCount} active, ${acceptingOrdersCount} accepting orders)`;
         } catch (error) {
             console.error("Error in Polymarket provider:", error);
-            return `Error connecting to Polymarket: ${error instanceof Error ? error.message : 'Unknown error'}`;
+            return `❌ Error connecting to Polymarket: ${error instanceof Error ? error.message : 'Unknown error'}`;
         }
     },
 };
