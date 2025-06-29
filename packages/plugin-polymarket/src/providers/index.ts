@@ -1,1 +1,0 @@
-export { walletProvider } from "./wallet"; 
