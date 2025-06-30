@@ -8,6 +8,7 @@ import { BrowserRouter, Route, Routes } from "react-router";
 import Chat from "./routes/chat";
 import Overview from "./routes/overview";
 import Home from "./routes/home";
+import MultiAgentChat from "./routes/multi-agent-chat";
 import useVersion from "./hooks/use-version";
 
 const queryClient = new QueryClient({
@@ -39,6 +40,10 @@ function App() {
                                         <Route
                                             path="chat/:agentId"
                                             element={<Chat />}
+                                        />
+                                        <Route
+                                            path="multi-agent-chat"
+                                            element={<MultiAgentChat />}
                                         />
                                         <Route
                                             path="settings/:agentId"

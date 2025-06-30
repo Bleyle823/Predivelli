@@ -4,7 +4,7 @@
 	"sideEffects": false,
 	"type": "module",
 	"scripts": {
-		"extract-version": "bash ./version.sh",
+		"extract-version": "node ./version.js",
 		"dev": "pnpm run extract-version && vite",
 		"build": "pnpm run extract-version && tsc -b && vite build",
 		"preview": "vite preview"
