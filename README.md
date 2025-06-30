@@ -1,4 +1,5 @@
-# Eliza - Multi-Agent AI Platform
+# Predivelli
+
 
 A sophisticated multi-agent AI platform enabling intelligent conversations between AI agents with distinct personalities and capabilities.
 
@@ -30,6 +31,22 @@ Create `.env` in root directory:
 ```env
 OPENAI_API_KEY=your_openai_api_key_here
 SERVER_PORT=3001
+# CLOB API credentials
+CLOB_API_KEY=your-clob-api-key-here
+CLOB_SECRET=your-clob-secret-here
+CLOB_PASS_PHRASE=your-clob-passphrase-here
+
+# Polymarket and Wallet credentials
+POLYMARKET_PRIVATE_KEY=your-private-key-here
+PK=your-private-key-here
+
+# Network configuration
+CHAIN_ID=137
+CLOB_API_URL=https://clob.polymarket.com
+WS_URL=wss://ws-subscriptions-clob.polymarket.com/ws/
+RPC_TOKEN=your-rpc-token-here
+FUNDER_ADDRESS=your-funder-wallet-address-here
+
 ```
 
 ### Running the Application
