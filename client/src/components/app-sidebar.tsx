@@ -16,7 +16,7 @@ import {
 import { apiClient } from "@/lib/api";
 import { NavLink, useLocation } from "react-router";
 import type { UUID } from "@elizaos/core";
-import { Book, Cog, User } from "lucide-react";
+import { Book, Cog, User, Users } from "lucide-react";
 import ConnectionStatus from "./connection-status";
 
 export function AppSidebar() {
@@ -56,6 +56,24 @@ export function AppSidebar() {
                 </SidebarMenu>
             </SidebarHeader>
             <SidebarContent>
+                <SidebarGroup>
+                    <SidebarGroupLabel>Chat</SidebarGroupLabel>
+                    <SidebarGroupContent>
+                        <SidebarMenu>
+                            <SidebarMenuItem>
+                                <NavLink to="/multi-agent-chat">
+                                    <SidebarMenuButton
+                                        isActive={location.pathname === "/multi-agent-chat"}
+                                    >
+                                        <Users />
+                                        <span>Multi-Agent Chat</span>
+                                    </SidebarMenuButton>
+                                </NavLink>
+                            </SidebarMenuItem>
+                        </SidebarMenu>
+                    </SidebarGroupContent>
+                </SidebarGroup>
+                
                 <SidebarGroup>
                     <SidebarGroupLabel>Agents</SidebarGroupLabel>
                     <SidebarGroupContent>

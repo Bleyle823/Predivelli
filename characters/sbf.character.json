@@ -7,18 +7,16 @@
             "model": "en_US-ryan-low"
         },
         "secrets": {
-            "POLYMARKET_API_KEY": "b9b0f50b-584e-2260-fc98-90a65c28a4bd",
-            "POLYMARKET_SECRET": "GiFNZ8cwl8WXiQC5aNkCY9CVVs9qZk1MnNl2Lwkmjy4=",
-            "POLYMARKET_PASSPHRASE": "0f4307732b3707cccbbc40b41b15d2b52adc55548d7f87504512adb8244ba58a",
-            "WALLET_PRIVATE_KEY": "0xf34cc7d6ebf0e9f2bd44031a288507b4c162729d37e41d8885c8aea6035ca1a5",
-            "RPC_PROVIDER_URL": "https://polygon-rpc.com"
+            "WALLET_PRIVATE_KEY": "0xb6c03ac8fdb421d2a7e2dea288549732ca0d38dbf48638193654fbc59a62603f",
+            "POLYMARKET_API_KEY": "${POLYMARKET_API_KEY}",
+            "POLYMARKET_SECRET": "${POLYMARKET_SECRET}",
+            "POLYMARKET_PASSPHRASE": "${POLYMARKET_PASSPHRASE}"
         }
     },
     "plugins": [
         "@elizaos/plugin-goat",
         "@elizaos/plugin-polymarket",
-        "@elizaos/plugin-football",
-        "@elizaos/plugin-agentkit"
+        "@elizaos/plugin-football"
     ],
     "postProcessors": [],
     "bio": [

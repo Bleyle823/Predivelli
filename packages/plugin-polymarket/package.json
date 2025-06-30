@@ -1,0 +1,54 @@
+{
+    "name": "@elizaos/plugin-polymarket",
+    "version": "0.0.1",
+    "description": "Polymarket prediction markets integration plugin for ElizaOS",
+    "main": "dist/index.js",
+    "type": "module",
+    "types": "dist/index.d.ts",
+    "files": [
+        "dist"
+    ],
+    "keywords": [
+        "elizaos",
+        "polymarket",
+        "prediction-markets",
+        "betting",
+        "defi"
+    ],
+    "dependencies": {
+        "@elizaos/core": "workspace:*",
+        "@polymarket/clob-client": "^1.0.0",
+        "@ethersproject/wallet": "^5.7.0",
+        "zod": "^3.23.0"
+    },
+    "devDependencies": {
+        "@types/node": "^20.0.0",
+        "tsup": "^8.3.5",
+        "typescript": "^5.0.0",
+        "vitest": "^1.0.0"
+    },
+    "scripts": {
+        "build": "tsup --format esm --clean",
+        "dev": "tsup --format esm --dts --watch",
+        "test": "vitest run",
+        "test:watch": "vitest watch",
+        "test:coverage": "vitest run --coverage",
+        "lint": "tsc --noEmit",
+        "prepublishOnly": "npm run build"
+    },
+    "exports": {
+        ".": {
+            "import": "./dist/index.js",
+            "types": "./dist/index.d.ts"
+        }
+    },
+    "engines": {
+        "node": ">=18.0.0"
+    },
+    "repository": {
+        "type": "git",
+        "url": "https://github.com/elizaos/eliza.git",
+        "directory": "packages/plugin-polymarket"
+    },
+    "license": "MIT"
+}
